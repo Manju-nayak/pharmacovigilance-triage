@@ -1,220 +1,252 @@
 
+import json
+import logging
+import uuid
 from contextlib import asynccontextmanager
-from uuid import uuid4
 
-from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi import FastAPI, Query, Request
+from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
+from app.evidence_triage import assess_with_evidence
+from app.retrieval import search_evidence
 from app.schemas import AdverseEventReport
 from app.storage import quarantine_record
-from app.retrieval import search_evidence
 from app.triage import assess_triage
+from app.workflow import run_workflow
+
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+METRICS = {
+    "agent_runs_started": 0,
+    "accepted_reports": 0,
+    "rejected_reports": 0,
+}
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    app.state.agent_runs_started = 0
-    app.state.accepted_reports = 0
-    app.state.rejected_reports = 0
+    logger.info("Pharmacovigilance triage API starting")
     yield
+    logger.info("Pharmacovigilance triage API shutting down")
 
 
 app = FastAPI(
-    title="Pharmacovigilance Intake and Triage Service",
-    version="0.3.0",
-    description=(
-        "Synthetic adverse-event intake, evidence retrieval, and "
-        "preliminary safety-signal triage API. Qualified human review "
-        "is required; the service does not make final medical or "
-        "regulatory decisions."
-    ),
+    title="Pharmacovigilance Adverse Event Intake and Triage Service",
+    version="0.5.0",
     lifespan=lifespan,
 )
 
 
-# --------------------------------------------------
-# Request ID middleware
-# --------------------------------------------------
-
 @app.middleware("http")
 async def add_request_id(request: Request, call_next):
-    request.state.request_id = str(uuid4())
+    request_id = str(uuid.uuid4())
+    request.state.request_id = request_id
+
     response = await call_next(request)
-    response.headers["X-Request-ID"] = request.state.request_id
+
+    response.headers["X-Request-ID"] = request_id
     return response
 
 
-# --------------------------------------------------
-# Validation error handling and quarantine
-# --------------------------------------------------
-
 @app.exception_handler(RequestValidationError)
-async def handle_validation_error(
+async def validation_exception_handler(
     request: Request,
     exc: RequestValidationError,
 ):
-    request_id = request.state.request_id
+    request_id = getattr(
+        request.state,
+        "request_id",
+        str(uuid.uuid4()),
+    )
 
-    errors = [
-        {
-            "location": list(error["loc"]),
-            "message": error["msg"],
-            "type": error["type"],
-        }
-        for error in exc.errors()
-    ]
-
+    # Preserve invalid requests in quarantine for investigation.
     try:
-        rejected = quarantine_record(
-            body=exc.body,
-            errors=errors,
+        raw_body = await request.body()
+
+        try:
+            body = json.loads(raw_body) if raw_body else {}
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            body = {
+                "unparsed_body": raw_body.decode(
+                    "utf-8", errors="replace"
+                )
+            }
+
+        safe_errors = jsonable_encoder(
+            exc.errors(),
+            custom_encoder={ValueError: str},
+        )
+
+        quarantine_record(
+            body=body,
+            errors=safe_errors,
             request_id=request_id,
         )
-    except (OSError, TypeError, ValueError):
-        request.app.state.rejected_reports += 1
 
-        return JSONResponse(
-            status_code=500,
-            content={
-                "request_id": request_id,
-                "status": "quarantine_failed",
-                "detail": "Rejected request could not be saved.",
-            },
+    except Exception:
+        # Return the original validation response even if quarantine
+        # storage fails.
+        logger.exception(
+            "Failed to save invalid request to quarantine. "
+            "request_id=%s",
+            request_id,
         )
 
-    request.app.state.rejected_reports += 1
+    METRICS["rejected_reports"] += 1
 
     return JSONResponse(
         status_code=422,
-        content={
-            "request_id": request_id,
-            "status": "rejected",
-            "detail": "Validation failed. No agent run started.",
-            "quarantine_id": rejected["quarantine_id"],
-            "errors": errors,
-        },
+        content=jsonable_encoder(
+            {
+                "status": "rejected",
+                "detail": exc.errors(),
+                "request_id": request_id,
+                "message": (
+                    "The submitted report failed schema validation "
+                    "and was rejected."
+                ),
+            },
+            custom_encoder={ValueError: str},
+        ),
     )
 
-
-# --------------------------------------------------
-# Health and metrics
-# --------------------------------------------------
 
 @app.get("/health")
 async def health():
     return {
         "status": "ok",
-        "service": "pharmacovigilance-intake",
-        "version": "0.3.0",
+        "version": app.version,
     }
 
 
 @app.get("/metrics")
-async def metrics(request: Request):
-    return {
-        "accepted_reports": request.app.state.accepted_reports,
-        "rejected_reports": request.app.state.rejected_reports,
-        "agent_runs_started": request.app.state.agent_runs_started,
-    }
+async def metrics():
+    return METRICS.copy()
 
-
-# --------------------------------------------------
-# Adverse-event report intake
-# --------------------------------------------------
 
 @app.post("/reports", status_code=202)
-async def submit_report(
-    report: AdverseEventReport,
-    request: Request,
-):
-    request.app.state.accepted_reports += 1
+async def submit_report(report: AdverseEventReport):
+    METRICS["accepted_reports"] += 1
 
     return {
-        "request_id": request.state.request_id,
         "case_id": report.case_id,
         "status": "accepted",
         "assessment_status": "not_started",
         "message": (
-            "Synthetic report passed validation. "
-            "No medical determination has been made."
+            "Report passed schema validation. "
+            "This endpoint does not make a final medical or regulatory decision."
         ),
     }
 
-
-# --------------------------------------------------
-# Evidence retrieval
-# --------------------------------------------------
 
 @app.get("/evidence/search")
 async def evidence_search(
     request: Request,
-    q: str = Query(
-        ...,
-        min_length=2,
-        max_length=500,
-        description="Keywords to search in the evidence corpus.",
-    ),
+    q: str = Query(..., min_length=2, max_length=500),
     top_k: int = Query(5, ge=1, le=10),
 ):
+    request_id = getattr(
+        request.state,
+        "request_id",
+        str(uuid.uuid4()),
+    )
+
     try:
         results = search_evidence(q, top_k=top_k)
 
-    except FileNotFoundError:
-        raise HTTPException(
+        return {
+            "request_id": request_id,
+            "query": q,
+            "result_count": len(results),
+            "results": results,
+        }
+
+    except (FileNotFoundError, OSError, ValueError):
+        logger.exception(
+            "Evidence search failed. request_id=%s",
+            request_id,
+        )
+
+        return JSONResponse(
             status_code=503,
-            detail="Evidence index is unavailable.",
-        )
-
-    except (OSError, ValueError):
-        raise HTTPException(
-            status_code=500,
-            detail="Evidence search failed.",
-        )
-
-    return {
-        "request_id": request.state.request_id,
-        "query": q,
-        "result_count": len(results),
-        "results": [
-            {
-                "source": result["source"],
-                "page": result["page"],
-                "extraction_method": result["extraction_method"],
-                "matched_terms": result["matched_terms"],
-                "keyword_overlap_score": round(
-                    result["score"], 3
+            content={
+                "request_id": request_id,
+                "query": q,
+                "result_count": 0,
+                "results": [],
+                "message": (
+                    "Evidence retrieval is temporarily unavailable."
                 ),
-                "text": result["text"],
-            }
-            for result in results
-        ],
-        "notice": (
-            "Keyword overlap is not medical confidence or proof "
-            "of causality. Verify each passage against its source. "
-            "This endpoint does not make medical or regulatory decisions."
-        ),
-    }
+            },
+        )
 
-
-# --------------------------------------------------
-# Preliminary safety-signal triage
-# --------------------------------------------------
 
 @app.post("/triage")
-async def triage_report(
-    report: AdverseEventReport,
-    request: Request,
-):
+async def triage_report(report: AdverseEventReport):
     result = assess_triage(report)
 
     return {
-        "request_id": request.state.request_id,
         "case_id": report.case_id,
         "triage": result,
-        "notice": (
-            "This is a preliminary safety-signal screen, not a "
-            "diagnosis, causality assessment, or final regulatory "
-            "decision. Qualified human review is required."
-        ),
+        **result,
     }
+
+
+@app.post("/triage/with-evidence")
+async def triage_with_evidence(report: AdverseEventReport):
+    request_id = str(uuid.uuid4())
+    result = assess_with_evidence(report)
+
+    return {
+        "request_id": request_id,
+        "case_id": report.case_id,
+        **result,
+    }
+
+
+@app.post("/workflow/run")
+async def run_agent_workflow(report: AdverseEventReport):
+    request_id = str(uuid.uuid4())
+    METRICS["agent_runs_started"] += 1
+
+    try:
+        result = run_workflow(report)
+
+        return {
+            "request_id": request_id,
+            "case_id": report.case_id,
+            "workflow_status": "completed",
+            "triage_result": result.get("triage_result"),
+            "evidence_result": result.get("evidence_result"),
+            "verification_result": result.get("verification_result"),
+            "errors": result.get("errors", []),
+            "escalation": result.get("escalation"),
+            "requires_qualified_review": True,
+            "causality_assessed": False,
+            "final_medical_decision": False,
+        }
+
+    except Exception:
+        logger.exception(
+            "Agent workflow failed. request_id=%s",
+            request_id,
+        )
+
+        return JSONResponse(
+            status_code=500,
+            content={
+                "request_id": request_id,
+                "case_id": report.case_id,
+                "workflow_status": "failed",
+                "message": (
+                    "The workflow could not complete. "
+                    "Qualified human review is required."
+                ),
+                "requires_qualified_review": True,
+                "final_medical_decision": False,
+            },
+        )

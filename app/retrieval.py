@@ -8,7 +8,7 @@ INDEX_PATH = PROJECT_DIR / "data" / "corpus" / "evidence_index.json"
 
 
 def load_index():
-    """Load evidence chunks from the JSON index."""
+    """Load and validate the evidence index."""
     if not INDEX_PATH.exists():
         raise FileNotFoundError(
             f"Evidence index not found: {INDEX_PATH}"
@@ -24,22 +24,21 @@ def load_index():
 
 
 def tokenize(text):
-    """Normalize text into lowercase keyword tokens."""
+    """Convert text into lowercase alphanumeric tokens."""
     return re.findall(r"[a-z0-9]+", text.lower())
 
 
 def search_evidence(query, top_k=5):
     """
-    Search evidence chunks by keyword overlap.
+    Search indexed evidence using keyword overlap.
 
-    Returns source filename, page, extraction method,
-    matched terms, and relevant text.
+    Returns matching evidence records ranked by overlap score.
     """
     if not query or not query.strip():
         return []
 
-    if top_k < 1:
-        raise ValueError("top_k must be at least 1.")
+    if not isinstance(top_k, int) or isinstance(top_k, bool) or top_k < 1:
+        raise ValueError("top_k must be an integer greater than or equal to 1.")
 
     query_terms = set(tokenize(query))
 
@@ -51,23 +50,32 @@ def search_evidence(query, top_k=5):
 
     for record in records:
         text = record.get("text", "")
+
+        if not isinstance(text, str) or not text.strip():
+            continue
+
         text_terms = set(tokenize(text))
         matched_terms = sorted(query_terms & text_terms)
 
         if not matched_terms:
             continue
 
-        results.append({
-            "source": record.get("source", "unknown"),
-            "page": record.get("page"),
-            "chunk": record.get("chunk"),
-            "extraction_method": record.get(
-                "extraction_method", "unknown"
-            ),
-            "matched_terms": matched_terms,
-            "score": len(matched_terms) / len(query_terms),
-            "text": text,
-        })
+        overlap_score = len(matched_terms) / len(query_terms)
+
+        results.append(
+            {
+                "source": record.get("source", "unknown"),
+                "page": record.get("page"),
+                "chunk": record.get("chunk"),
+                "extraction_method": record.get(
+                    "extraction_method", "unknown"
+                ),
+                "matched_terms": matched_terms,
+                "score": overlap_score,
+                "keyword_overlap_score": overlap_score,
+                "text": text,
+            }
+        )
 
     results.sort(
         key=lambda item: (
@@ -78,25 +86,3 @@ def search_evidence(query, top_k=5):
     )
 
     return results[:top_k]
-
-
-if __name__ == "__main__":
-    query = (
-        "carbamazepine severe skin reactions "
-        "Stevens Johnson syndrome"
-    )
-
-    results = search_evidence(query, top_k=5)
-
-    print(f"Query: {query}")
-    print(f"Results found: {len(results)}")
-
-    for number, result in enumerate(results, start=1):
-        print("\n" + "=" * 60)
-        print(f"Result {number}")
-        print(f"Source: {result['source']}")
-        print(f"Page: {result['page']}")
-        print(f"Method: {result['extraction_method']}")
-        print(f"Score: {result['score']:.2f}")
-        print(f"Matched terms: {result['matched_terms']}")
-        print(f"Text: {result['text'][:700]}")
