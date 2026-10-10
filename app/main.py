@@ -9,6 +9,7 @@ from fastapi.responses import JSONResponse
 from app.schemas import AdverseEventReport
 from app.storage import quarantine_record
 from app.retrieval import search_evidence
+from app.triage import assess_triage
 
 
 @asynccontextmanager
@@ -21,15 +22,20 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="Pharmacovigilance Intake and Triage Service",
-    version="0.2.0",
+    version="0.3.0",
     description=(
-        "Synthetic adverse-event intake and evidence retrieval API. "
-        "Evidence search is informational and does not make "
-        "medical or regulatory determinations."
+        "Synthetic adverse-event intake, evidence retrieval, and "
+        "preliminary safety-signal triage API. Qualified human review "
+        "is required; the service does not make final medical or "
+        "regulatory decisions."
     ),
     lifespan=lifespan,
 )
 
+
+# --------------------------------------------------
+# Request ID middleware
+# --------------------------------------------------
 
 @app.middleware("http")
 async def add_request_id(request: Request, call_next):
@@ -38,6 +44,10 @@ async def add_request_id(request: Request, call_next):
     response.headers["X-Request-ID"] = request.state.request_id
     return response
 
+
+# --------------------------------------------------
+# Validation error handling and quarantine
+# --------------------------------------------------
 
 @app.exception_handler(RequestValidationError)
 async def handle_validation_error(
@@ -63,6 +73,7 @@ async def handle_validation_error(
         )
     except (OSError, TypeError, ValueError):
         request.app.state.rejected_reports += 1
+
         return JSONResponse(
             status_code=500,
             content={
@@ -86,12 +97,16 @@ async def handle_validation_error(
     )
 
 
+# --------------------------------------------------
+# Health and metrics
+# --------------------------------------------------
+
 @app.get("/health")
 async def health():
     return {
         "status": "ok",
         "service": "pharmacovigilance-intake",
-        "version": "0.2.0",
+        "version": "0.3.0",
     }
 
 
@@ -103,6 +118,10 @@ async def metrics(request: Request):
         "agent_runs_started": request.app.state.agent_runs_started,
     }
 
+
+# --------------------------------------------------
+# Adverse-event report intake
+# --------------------------------------------------
 
 @app.post("/reports", status_code=202)
 async def submit_report(
@@ -123,6 +142,10 @@ async def submit_report(
     }
 
 
+# --------------------------------------------------
+# Evidence retrieval
+# --------------------------------------------------
+
 @app.get("/evidence/search")
 async def evidence_search(
     request: Request,
@@ -136,11 +159,13 @@ async def evidence_search(
 ):
     try:
         results = search_evidence(q, top_k=top_k)
+
     except FileNotFoundError:
         raise HTTPException(
             status_code=503,
             detail="Evidence index is unavailable.",
         )
+
     except (OSError, ValueError):
         raise HTTPException(
             status_code=500,
@@ -157,7 +182,9 @@ async def evidence_search(
                 "page": result["page"],
                 "extraction_method": result["extraction_method"],
                 "matched_terms": result["matched_terms"],
-                "keyword_overlap_score": round(result["score"], 3),
+                "keyword_overlap_score": round(
+                    result["score"], 3
+                ),
                 "text": result["text"],
             }
             for result in results
@@ -166,5 +193,28 @@ async def evidence_search(
             "Keyword overlap is not medical confidence or proof "
             "of causality. Verify each passage against its source. "
             "This endpoint does not make medical or regulatory decisions."
+        ),
+    }
+
+
+# --------------------------------------------------
+# Preliminary safety-signal triage
+# --------------------------------------------------
+
+@app.post("/triage")
+async def triage_report(
+    report: AdverseEventReport,
+    request: Request,
+):
+    result = assess_triage(report)
+
+    return {
+        "request_id": request.state.request_id,
+        "case_id": report.case_id,
+        "triage": result,
+        "notice": (
+            "This is a preliminary safety-signal screen, not a "
+            "diagnosis, causality assessment, or final regulatory "
+            "decision. Qualified human review is required."
         ),
     }

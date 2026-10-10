@@ -134,3 +134,61 @@ def test_evidence_search_rejects_invalid_top_k():
         )
 
     assert response.status_code == 422
+
+def test_triage_endpoint_flags_skin_peeling():
+    report = synthetic_report()
+    report["reaction_description"] = (
+        "Severe skin peeling reported after starting the medicine."
+    )
+    report["hospitalization"] = True
+
+    with TestClient(app) as client:
+        response = client.post("/triage", json=report)
+
+    assert response.status_code == 200
+
+    body = response.json()
+    triage = body["triage"]
+
+    assert body["case_id"] == "SYN-001"
+    assert triage["priority"] == "urgent_human_review"
+    assert triage["causality_assessed"] is False
+    assert triage["requires_qualified_review"] is True
+
+    signal_names = {
+        signal["signal"] for signal in triage["signals"]
+    }
+    assert "reported_hospitalization" in signal_names
+    assert "potentially_serious_reaction_text" in signal_names
+
+
+def test_triage_endpoint_rejects_inconsistent_death_fields():
+    report = synthetic_report()
+    report["death"] = True
+    report["outcome"] = "recovering"
+
+    with TestClient(app) as client:
+        response = client.post("/triage", json=report)
+
+    assert response.status_code == 422
+    assert response.json()["status"] == "rejected"
+
+
+def test_triage_endpoint_flags_reported_death():
+    report = synthetic_report()
+    report["death"] = True
+    report["outcome"] = "death"
+
+    with TestClient(app) as client:
+        response = client.post("/triage", json=report)
+
+    assert response.status_code == 200
+
+    triage = response.json()["triage"]
+    assert triage["priority"] == "urgent_human_review"
+    assert triage["causality_assessed"] is False
+
+    signal_names = {
+        signal["signal"] for signal in triage["signals"]
+    }
+    assert "reported_death" in signal_names
