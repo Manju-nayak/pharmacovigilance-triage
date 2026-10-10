@@ -2,12 +2,13 @@
 from contextlib import asynccontextmanager
 from uuid import uuid4
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
 from app.schemas import AdverseEventReport
 from app.storage import quarantine_record
+from app.retrieval import search_evidence
 
 
 @asynccontextmanager
@@ -20,8 +21,12 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="Pharmacovigilance Intake and Triage Service",
-    version="0.1.0",
-    description="Phase 1 intake API. Synthetic cases only.",
+    version="0.2.0",
+    description=(
+        "Synthetic adverse-event intake and evidence retrieval API. "
+        "Evidence search is informational and does not make "
+        "medical or regulatory determinations."
+    ),
     lifespan=lifespan,
 )
 
@@ -86,7 +91,7 @@ async def health():
     return {
         "status": "ok",
         "service": "pharmacovigilance-intake",
-        "version": "0.1.0",
+        "version": "0.2.0",
     }
 
 
@@ -114,5 +119,52 @@ async def submit_report(
         "message": (
             "Synthetic report passed validation. "
             "No medical determination has been made."
+        ),
+    }
+
+
+@app.get("/evidence/search")
+async def evidence_search(
+    request: Request,
+    q: str = Query(
+        ...,
+        min_length=2,
+        max_length=500,
+        description="Keywords to search in the evidence corpus.",
+    ),
+    top_k: int = Query(5, ge=1, le=10),
+):
+    try:
+        results = search_evidence(q, top_k=top_k)
+    except FileNotFoundError:
+        raise HTTPException(
+            status_code=503,
+            detail="Evidence index is unavailable.",
+        )
+    except (OSError, ValueError):
+        raise HTTPException(
+            status_code=500,
+            detail="Evidence search failed.",
+        )
+
+    return {
+        "request_id": request.state.request_id,
+        "query": q,
+        "result_count": len(results),
+        "results": [
+            {
+                "source": result["source"],
+                "page": result["page"],
+                "extraction_method": result["extraction_method"],
+                "matched_terms": result["matched_terms"],
+                "keyword_overlap_score": round(result["score"], 3),
+                "text": result["text"],
+            }
+            for result in results
+        ],
+        "notice": (
+            "Keyword overlap is not medical confidence or proof "
+            "of causality. Verify each passage against its source. "
+            "This endpoint does not make medical or regulatory decisions."
         ),
     }

@@ -32,7 +32,10 @@ def test_health_endpoint():
 
 def test_valid_report_is_accepted():
     with TestClient(app) as client:
-        response = client.post("/reports", json=synthetic_report())
+        response = client.post(
+            "/reports",
+            json=synthetic_report(),
+        )
 
     assert response.status_code == 202
     assert response.json()["status"] == "accepted"
@@ -56,7 +59,78 @@ def test_invalid_age_is_quarantined(tmp_path, monkeypatch):
     files = list(tmp_path.glob("*.json"))
     assert len(files) == 1
 
-    saved = json.loads(files[0].read_text(encoding="utf-8"))
+    saved = json.loads(
+        files[0].read_text(encoding="utf-8")
+    )
     assert saved["status"] == "rejected"
     assert saved["body"]["patient_age"] == -5
-    
+
+
+def test_evidence_search_returns_results():
+    with TestClient(app) as client:
+        response = client.get(
+            "/evidence/search",
+            params={
+                "q": "carbamazepine serious skin reactions",
+                "top_k": 5,
+            },
+        )
+
+    assert response.status_code == 200
+
+    body = response.json()
+    assert body["result_count"] > 0
+    assert len(body["results"]) <= 5
+    assert body["request_id"]
+
+    first = body["results"][0]
+    assert first["source"]
+    assert first["page"] >= 1
+    assert first["text"]
+    assert "keyword_overlap_score" in first
+
+
+def test_evidence_search_finds_ocr_notice():
+    with TestClient(app) as client:
+        response = client.get(
+            "/evidence/search",
+            params={
+                "q": (
+                    "carbamazepine life threatening skin reactions"
+                ),
+                "top_k": 10,
+            },
+        )
+
+    assert response.status_code == 200
+
+    results = response.json()["results"]
+
+    assert any(
+        result["source"] == "carbamazepine_cdsco_safety_notice.pdf"
+        and result["extraction_method"] == "ocr"
+        for result in results
+    )
+
+
+def test_evidence_search_rejects_short_query():
+    with TestClient(app) as client:
+        response = client.get(
+            "/evidence/search",
+            params={"q": "a"},
+        )
+
+    assert response.status_code == 422
+
+
+def test_evidence_search_rejects_invalid_top_k():
+    with TestClient(app) as client:
+        response = client.get(
+            "/evidence/search",
+            params={
+                "q": "carbamazepine",
+                "top_k": 0,
+            },
+        )
+
+    assert response.status_code == 422
