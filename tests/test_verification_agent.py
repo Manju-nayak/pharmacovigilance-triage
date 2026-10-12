@@ -27,6 +27,7 @@ def test_verification_with_evidence():
     assert result["requires_qualified_review"] is True
 
 
+
 def test_verification_without_evidence():
     state = {
         "workflow_status": "evidence_completed",
@@ -39,9 +40,11 @@ def test_verification_without_evidence():
 
     result = verification_agent(state)
 
-    assert result["workflow_status"] == "verification_completed"
+    assert result["workflow_status"] == "verification_failed"
+    assert result["verification_result"]["verified"] is False
     assert result["verification_result"]["evidence_found"] is False
-    assert len(result["verification_result"]["limitations"]) > 0
+    assert result["verification_result"]["citations_valid"] is False
+    assert result["requires_qualified_review"] is True
     assert result["escalation"] == "human_review_required"
 
 
