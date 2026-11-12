@@ -192,3 +192,73 @@ def test_triage_endpoint_flags_reported_death():
         signal["signal"] for signal in triage["signals"]
     }
     assert "reported_death" in signal_names
+
+
+
+def test_workflow_api_handles_agent_exception():
+    from unittest.mock import patch
+    from fastapi.testclient import TestClient
+    from app.main import app
+
+    with patch(
+        "app.main.run_workflow",
+        side_effect=RuntimeError("simulated agent failure"),
+    ):
+        with TestClient(app) as client:
+            response = client.post(
+                "/workflow/run",
+                json={
+                    "case_id": "SYN-API-FAIL-001",
+                    "drug_name": "example-drug",
+                    "reaction_description": "Nausea after use.",
+                    "patient_age": 35,
+                    "reporter_type": "patient",
+                    "outcome": "recovering",
+                    "event_onset_days": 2,
+                    "hospitalization": False,
+                    "death": False,
+                },
+            )
+
+    assert response.status_code == 500
+    body = response.json()
+    assert body["workflow_status"] == "failed"
+    assert body["requires_qualified_review"] is True
+    assert body["final_medical_decision"] is False
+
+
+def test_workflow_api_preserves_verification_failure_status():
+    from unittest.mock import patch
+    from fastapi.testclient import TestClient
+    from app.main import app
+
+    failed_result = {
+        "workflow_status": "verification_failed",
+        "requires_qualified_review": True,
+        "escalation": "human_review_required",
+        "causality_assessed": False,
+        "final_medical_decision": False,
+    }
+
+    with patch("app.main.run_workflow", return_value=failed_result):
+        with TestClient(app) as client:
+            response = client.post(
+                "/workflow/run",
+                json={
+                    "case_id": "SYN-API-VERIFY-001",
+                    "drug_name": "example-drug",
+                    "reaction_description": "Nausea after use.",
+                    "patient_age": 35,
+                    "reporter_type": "patient",
+                    "outcome": "recovering",
+                    "event_onset_days": 2,
+                    "hospitalization": False,
+                    "death": False,
+                },
+            )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["workflow_status"] == "verification_failed"
+    assert body["requires_qualified_review"] is True
+    assert body["final_medical_decision"] is False

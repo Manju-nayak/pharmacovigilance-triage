@@ -219,7 +219,7 @@ async def run_agent_workflow(report: AdverseEventReport):
         return {
             "request_id": request_id,
             "case_id": report.case_id,
-            "workflow_status": "completed",
+            "workflow_status": result.get("workflow_status", "unknown"),
             "triage_result": result.get("triage_result"),
             "evidence_result": result.get("evidence_result"),
             "verification_result": result.get("verification_result"),
