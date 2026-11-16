@@ -2,7 +2,6 @@
 import json
 
 from fastapi.testclient import TestClient
-
 from app.main import app
 
 
@@ -38,8 +37,14 @@ def test_valid_report_is_accepted():
         )
 
     assert response.status_code == 202
-    assert response.json()["status"] == "accepted"
-    assert response.json()["assessment_status"] == "not_started"
+
+    body = response.json()
+    assert body["status"] == "queued"
+    assert body["run_id"]
+    assert body["case_id"] == "SYN-001"
+    assert body["status_url"]
+    assert body["requires_qualified_review"] is True
+    assert body["final_medical_decision"] is False
 
 
 def test_invalid_age_is_quarantined(tmp_path, monkeypatch):
@@ -49,12 +54,19 @@ def test_invalid_age_is_quarantined(tmp_path, monkeypatch):
     report["patient_age"] = -5
 
     with TestClient(app) as client:
+        metrics_before = client.get("/metrics").json()
+
         response = client.post("/reports", json=report)
-        metrics = client.get("/metrics").json()
+
+        metrics_after = client.get("/metrics").json()
 
     assert response.status_code == 422
     assert response.json()["status"] == "rejected"
-    assert metrics["agent_runs_started"] == 0
+
+    assert (
+        metrics_after["agent_runs_started"]
+        == metrics_before["agent_runs_started"]
+    )
 
     files = list(tmp_path.glob("*.json"))
     assert len(files) == 1
@@ -135,6 +147,7 @@ def test_evidence_search_rejects_invalid_top_k():
 
     assert response.status_code == 422
 
+
 def test_triage_endpoint_flags_skin_peeling():
     report = synthetic_report()
     report["reaction_description"] = (
@@ -194,11 +207,8 @@ def test_triage_endpoint_flags_reported_death():
     assert "reported_death" in signal_names
 
 
-
 def test_workflow_api_handles_agent_exception():
     from unittest.mock import patch
-    from fastapi.testclient import TestClient
-    from app.main import app
 
     with patch(
         "app.main.run_workflow",
@@ -229,8 +239,6 @@ def test_workflow_api_handles_agent_exception():
 
 def test_workflow_api_preserves_verification_failure_status():
     from unittest.mock import patch
-    from fastapi.testclient import TestClient
-    from app.main import app
 
     failed_result = {
         "workflow_status": "verification_failed",
@@ -240,7 +248,10 @@ def test_workflow_api_preserves_verification_failure_status():
         "final_medical_decision": False,
     }
 
-    with patch("app.main.run_workflow", return_value=failed_result):
+    with patch(
+        "app.main.run_workflow",
+        return_value=failed_result,
+    ):
         with TestClient(app) as client:
             response = client.post(
                 "/workflow/run",

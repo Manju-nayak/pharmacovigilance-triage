@@ -2,6 +2,8 @@
 fastapi
 uvicorn[standard]
 pytest
-httpx2
+httpx
 pypdf
 langgraph
+redis
+rq

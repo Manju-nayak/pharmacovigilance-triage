@@ -4,7 +4,12 @@ import logging
 import uuid
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, Query, Request
+from fastapi import (
+    FastAPI,
+    HTTPException,
+    Query,
+    Request,
+)
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
@@ -16,9 +21,14 @@ from app.storage import quarantine_record
 from app.triage import assess_triage
 from app.workflow import run_workflow
 
+# New asynchronous processing imports
+from app.queue import enqueue_report
+from app.run_store import create_run, get_run, update_run
+
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
 
 METRICS = {
     "agent_runs_started": 0,
@@ -36,10 +46,14 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="Pharmacovigilance Adverse Event Intake and Triage Service",
-    version="0.5.0",
+    version="0.6.0",
     lifespan=lifespan,
 )
 
+
+# --------------------------------------------------
+# REQUEST ID MIDDLEWARE
+# --------------------------------------------------
 
 @app.middleware("http")
 async def add_request_id(request: Request, call_next):
@@ -52,6 +66,10 @@ async def add_request_id(request: Request, call_next):
     return response
 
 
+# --------------------------------------------------
+# VALIDATION ERROR HANDLER
+# --------------------------------------------------
+
 @app.exception_handler(RequestValidationError)
 async def validation_exception_handler(
     request: Request,
@@ -63,7 +81,6 @@ async def validation_exception_handler(
         str(uuid.uuid4()),
     )
 
-    # Preserve invalid requests in quarantine for investigation.
     try:
         raw_body = await request.body()
 
@@ -72,7 +89,8 @@ async def validation_exception_handler(
         except (json.JSONDecodeError, UnicodeDecodeError):
             body = {
                 "unparsed_body": raw_body.decode(
-                    "utf-8", errors="replace"
+                    "utf-8",
+                    errors="replace",
                 )
             }
 
@@ -88,8 +106,6 @@ async def validation_exception_handler(
         )
 
     except Exception:
-        # Return the original validation response even if quarantine
-        # storage fails.
         logger.exception(
             "Failed to save invalid request to quarantine. "
             "request_id=%s",
@@ -115,6 +131,10 @@ async def validation_exception_handler(
     )
 
 
+# --------------------------------------------------
+# HEALTH ENDPOINT
+# --------------------------------------------------
+
 @app.get("/health")
 async def health():
     return {
@@ -123,25 +143,138 @@ async def health():
     }
 
 
+# --------------------------------------------------
+# METRICS ENDPOINT
+# --------------------------------------------------
+
 @app.get("/metrics")
 async def metrics():
     return METRICS.copy()
 
 
+# --------------------------------------------------
+# ASYNCHRONOUS REPORT SUBMISSION
+# --------------------------------------------------
+
 @app.post("/reports", status_code=202)
-async def submit_report(report: AdverseEventReport):
-    METRICS["accepted_reports"] += 1
+def submit_report(report: AdverseEventReport):
+    """
+    Accept an adverse-event report and enqueue
+    background processing.
 
-    return {
-        "case_id": report.case_id,
-        "status": "accepted",
-        "assessment_status": "not_started",
-        "message": (
-            "Report passed schema validation. "
-            "This endpoint does not make a final medical or regulatory decision."
-        ),
-    }
+    Returns immediately with a unique run ID.
+    """
 
+    run_id = str(uuid.uuid4())
+
+    try:
+        # Step 1: Create initial run record.
+        create_run(
+            run_id=run_id,
+            case_id=report.case_id,
+        )
+
+        # Step 2: Convert report into JSON-compatible data.
+        report_data = report.model_dump(mode="json")
+
+        # Step 3: Enqueue the report for background processing.
+        enqueue_report(
+            run_id=run_id,
+            report_data=report_data,
+        )
+
+        # Step 4: Update metrics after successful enqueue.
+        METRICS["accepted_reports"] += 1
+        METRICS["agent_runs_started"] += 1
+
+        logger.info(
+            "Report queued successfully. "
+            "run_id=%s case_id=%s",
+            run_id,
+            report.case_id,
+        )
+
+        return {
+            "run_id": run_id,
+            "case_id": report.case_id,
+            "status": "queued",
+            "message": (
+                "Report accepted for background processing."
+            ),
+            "status_url": f"/runs/{run_id}",
+            "requires_qualified_review": True,
+            "final_medical_decision": False,
+        }
+
+    except Exception:
+        logger.exception(
+            "Failed to enqueue report. run_id=%s",
+            run_id,
+        )
+
+        # Attempt to record the failure.
+        try:
+            update_run(
+                run_id,
+                status="failed",
+                error="Unable to enqueue report for processing.",
+            )
+        except Exception:
+            logger.exception(
+                "Failed to update run record. run_id=%s",
+                run_id,
+            )
+
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Report processing service is temporarily unavailable."
+            ),
+        )
+
+
+# --------------------------------------------------
+# RUN STATUS POLLING
+# --------------------------------------------------
+
+@app.get("/runs/{run_id}")
+def get_run_status(run_id: str):
+    """
+    Retrieve processing status and result
+    using the unique run ID.
+    """
+
+    try:
+        run = get_run(run_id)
+
+        if run is None:
+            raise HTTPException(
+                status_code=404,
+                detail="Run ID not found.",
+            )
+
+        return run
+
+    except HTTPException:
+        raise
+
+    except Exception:
+        logger.exception(
+            "Failed to retrieve run status. run_id=%s",
+            run_id,
+        )
+
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Run status service is temporarily unavailable."
+            ),
+        )
+
+
+# --------------------------------------------------
+# EVIDENCE SEARCH
+# --------------------------------------------------
 
 @app.get("/evidence/search")
 async def evidence_search(
@@ -185,6 +318,10 @@ async def evidence_search(
         )
 
 
+# --------------------------------------------------
+# SYNCHRONOUS TRIAGE
+# --------------------------------------------------
+
 @app.post("/triage")
 async def triage_report(report: AdverseEventReport):
     result = assess_triage(report)
@@ -195,6 +332,10 @@ async def triage_report(report: AdverseEventReport):
         **result,
     }
 
+
+# --------------------------------------------------
+# TRIAGE WITH EVIDENCE
+# --------------------------------------------------
 
 @app.post("/triage/with-evidence")
 async def triage_with_evidence(report: AdverseEventReport):
@@ -208,6 +349,10 @@ async def triage_with_evidence(report: AdverseEventReport):
     }
 
 
+# --------------------------------------------------
+# EXISTING SYNCHRONOUS LANGGRAPH WORKFLOW
+# --------------------------------------------------
+
 @app.post("/workflow/run")
 async def run_agent_workflow(report: AdverseEventReport):
     request_id = str(uuid.uuid4())
@@ -219,10 +364,15 @@ async def run_agent_workflow(report: AdverseEventReport):
         return {
             "request_id": request_id,
             "case_id": report.case_id,
-            "workflow_status": result.get("workflow_status", "unknown"),
+            "workflow_status": result.get(
+                "workflow_status",
+                "unknown",
+            ),
             "triage_result": result.get("triage_result"),
             "evidence_result": result.get("evidence_result"),
-            "verification_result": result.get("verification_result"),
+            "verification_result": result.get(
+                "verification_result"
+            ),
             "errors": result.get("errors", []),
             "escalation": result.get("escalation"),
             "requires_qualified_review": True,
