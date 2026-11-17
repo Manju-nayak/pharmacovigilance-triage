@@ -1,4 +1,3 @@
-
 from typing import Any
 
 from app.evidence_triage import assess_with_evidence
@@ -6,12 +5,11 @@ from app.schemas import AdverseEventReport
 from app.workflow_state import TriageWorkflowState
 
 
-def evidence_agent(
-    state: TriageWorkflowState,
-) -> dict[str, Any]:
-    """Retrieve supporting document evidence for a triaged report."""
+def evidence_agent(state: TriageWorkflowState) -> dict[str, Any]:
+    """Retrieve evidence for a triaged adverse-event report."""
 
     report_data = state.get("report")
+    errors = list(state.get("errors", []))
 
     if (
         state.get("workflow_status") != "triage_completed"
@@ -19,20 +17,28 @@ def evidence_agent(
     ):
         return {
             "workflow_status": "evidence_skipped",
-            "errors": state.get("errors", [])
-            + ["Evidence retrieval requires completed triage."],
+            "errors": errors + [
+                "Evidence retrieval requires completed triage."
+            ],
             "requires_qualified_review": True,
             "escalation": "human_review_required",
         }
 
     try:
         report = AdverseEventReport.model_validate(report_data)
-        evidence_result = assess_with_evidence(report)
-    except (TypeError, ValueError, KeyError) as exc:
+        retry_count = state.get("retry_count", 0)
+
+        evidence_result = assess_with_evidence(
+            report,
+            retry_count=retry_count,
+        )
+
+    except (TypeError, ValueError, KeyError, OSError) as exc:
         return {
             "workflow_status": "evidence_failed",
-            "errors": state.get("errors", [])
-            + [f"Evidence processing failed: {type(exc).__name__}"],
+            "errors": errors + [
+                f"Evidence processing failed: {type(exc).__name__}"
+            ],
             "requires_qualified_review": True,
             "escalation": "human_review_required",
         }
@@ -40,6 +46,7 @@ def evidence_agent(
     return {
         "evidence_result": evidence_result,
         "workflow_status": "evidence_completed",
+        "errors": errors,
         "requires_qualified_review": True,
         "escalation": "human_review_required",
     }

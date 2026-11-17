@@ -1,13 +1,22 @@
-
 from typing import Any
 from app.workflow_state import TriageWorkflowState
 
 
+def get_signal_names(signals: list) -> set:
+    """Extract signal names for comparison."""
+    return {
+        item.get("signal")
+        for item in signals
+        if isinstance(item, dict) and item.get("signal")
+    }
+
+
 def verification_agent(state: TriageWorkflowState) -> dict[str, Any]:
-    """Validate evidence structure and flag cases for qualified review."""
+    """Validate evidence structure and consistency with triage output."""
 
     errors = list(state.get("errors", []))
     evidence_result = state.get("evidence_result")
+    triage_result = state.get("triage_result")
 
     if state.get("workflow_status") != "evidence_completed":
         errors.append("Evidence processing was incomplete.")
@@ -17,6 +26,8 @@ def verification_agent(state: TriageWorkflowState) -> dict[str, Any]:
                 "verified": False,
                 "evidence_found": False,
                 "citations_valid": False,
+                "consistency_checked": False,
+                "consistency_valid": False,
                 "reason": "evidence_processing_incomplete",
                 "semantic_support_verified": False,
                 "causality_assessed": False,
@@ -34,6 +45,7 @@ def verification_agent(state: TriageWorkflowState) -> dict[str, Any]:
 
     evidence = evidence_result.get("evidence", [])
     retrieval_status = evidence_result.get("retrieval_status", "unknown")
+
     valid_passages = []
     evidence_errors = []
 
@@ -72,10 +84,45 @@ def verification_agent(state: TriageWorkflowState) -> dict[str, Any]:
         and len(valid_passages) == len(evidence)
     )
     evidence_found = len(valid_passages) > 0
+
+    # Compare the Triage Agent output with the Evidence Agent output.
+    consistency_checked = isinstance(triage_result, dict)
+    consistency_valid = None
+
+    if consistency_checked:
+        triage_priority = triage_result.get("priority")
+        evidence_priority = evidence_result.get("priority")
+
+        triage_signals = triage_result.get("signals", [])
+        evidence_signals = evidence_result.get("signals", [])
+
+        priority_matches = (
+            triage_priority is not None
+            and triage_priority == evidence_priority
+        )
+
+        signals_match = (
+            isinstance(triage_signals, list)
+            and isinstance(evidence_signals, list)
+            and get_signal_names(triage_signals)
+            == get_signal_names(evidence_signals)
+        )
+
+        consistency_valid = priority_matches and signals_match
+
+        if not consistency_valid:
+            evidence_errors.append(
+                "Evidence result does not match the original triage output."
+            )
+            errors.append(
+                "Consistency check failed between triage and evidence results."
+            )
+
     verified = (
         retrieval_status == "success"
         and evidence_found
         and citations_valid
+        and consistency_valid is not False
     )
 
     if not verified:
@@ -91,16 +138,19 @@ def verification_agent(state: TriageWorkflowState) -> dict[str, Any]:
         "retrieval_status": retrieval_status,
         "valid_passage_count": len(valid_passages),
         "invalid_passage_count": len(evidence_errors),
+        "consistency_checked": consistency_checked,
+        "consistency_valid": consistency_valid,
         "reason": (
-            "evidence_traceability_checks_passed"
+            "evidence_verification_checks_passed"
             if verified
             else "evidence_verification_failed"
         ),
         "semantic_support_verified": False,
         "limitations": [
             "Source, page, and text fields were checked.",
+            "Triage priority and signal consistency were compared when available.",
             "These checks do not prove that a passage supports a medical claim.",
-            "The original source must be checked to confirm citation traceability.",
+            "The original source must be checked by a qualified reviewer.",
         ],
         "causality_assessed": False,
         "final_medical_decision": False,
