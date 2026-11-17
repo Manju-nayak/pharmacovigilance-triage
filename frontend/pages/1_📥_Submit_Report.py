@@ -8,6 +8,10 @@ from frontend.utils.session import (
     init_session_state,
     add_or_update_history_record,
 )
+from frontend.utils.validators import (
+    validate_death_outcome_consistency,
+    validate_report_form,
+)
 from frontend.utils.ui_components import (
     load_css,
     render_regulatory_banner,
@@ -205,17 +209,26 @@ if submit_button:
         "death": bool(death),
     }
 
-    # Consistency pre-check alert
-    if death and outcome != "death":
-        st.error(
-            "⚠️ Validation Error: If 'Resulted in Death' is checked, outcome must be 'Death'. "
-            "The backend will reject inconsistent reports."
+    # Strict client-side validation: prevent submission when death/outcome are inconsistent
+    is_consistent, consistency_err = validate_death_outcome_consistency(death, outcome)
+    if not is_consistent:
+        st.error(f"⛔ Form Validation Error: {consistency_err}")
+        st.warning(
+            "⚠️ Submission blocked: Inconsistent mortality and outcome data violates "
+            "Pydantic schema constraints. Please correct the fields above to proceed."
         )
-    elif outcome == "death" and not death:
-        st.error(
-            "⚠️ Validation Error: If outcome is 'Death', 'Resulted in Death' must be checked. "
-            "The backend will reject inconsistent reports."
-        )
+        st.stop()
+
+    # Basic field requirements
+    if not payload["case_id"] or len(payload["case_id"]) < 3:
+        st.error("⛔ Form Validation Error: Case ID must be at least 3 characters.")
+        st.stop()
+    if not payload["drug_name"] or len(payload["drug_name"]) < 2:
+        st.error("⛔ Form Validation Error: Suspect drug name must be at least 2 characters.")
+        st.stop()
+    if not payload["reaction_description"] or len(payload["reaction_description"]) < 5:
+        st.error("⛔ Form Validation Error: Reaction description must be at least 5 characters.")
+        st.stop()
 
     submitted_at = datetime.now(timezone.utc).isoformat()
 

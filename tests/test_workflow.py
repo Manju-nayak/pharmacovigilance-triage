@@ -72,3 +72,34 @@ def test_workflow_does_not_claim_verification_success_without_evidence():
     assert result["workflow_status"] == "verification_failed"
     assert result["requires_qualified_review"] is True
     assert result["escalation"] == "human_review_required"
+
+
+def test_workflow_evidence_results_contain_retrieval_scores():
+    initial_state = {
+        "request_id": "test-request-scores",
+        "report": {
+            "case_id": "SYN-WORKFLOW-SCORES",
+            "drug_name": "carbamazepine",
+            "reaction_description": (
+                "Severe skin peeling reported after starting the medicine."
+            ),
+            "patient_age": 35,
+            "reporter_type": "patient",
+            "outcome": "recovering",
+            "event_onset_days": 7,
+            "hospitalization": True,
+            "death": False,
+        },
+        "errors": [],
+    }
+
+    result = triage_workflow.invoke(initial_state)
+    assert result["workflow_status"] == "verification_completed"
+    evidence_items = result["evidence_result"]["evidence"]
+    assert len(evidence_items) > 0
+    for item in evidence_items:
+        assert "score" in item
+        assert "keyword_overlap_score" in item
+        assert isinstance(item["score"], float)
+        assert item["score"] > 0
+

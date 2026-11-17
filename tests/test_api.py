@@ -78,6 +78,34 @@ def test_invalid_age_is_quarantined(tmp_path, monkeypatch):
     assert saved["body"]["patient_age"] == -5
 
 
+def test_validation_handler_sanitizes_pydantic_custom_errors(tmp_path, monkeypatch):
+    monkeypatch.setenv("QUARANTINE_DIR", str(tmp_path))
+
+    report = synthetic_report()
+    report["death"] = True
+    report["outcome"] = "recovering"  # triggers custom ValueError in model_validator
+
+    with TestClient(app) as client:
+        response = client.post("/reports", json=report)
+
+    assert response.status_code == 422
+    body = response.json()
+    assert body["status"] == "rejected"
+    assert "detail" in body
+    assert isinstance(body["detail"], list)
+    assert any(
+        "If death is true, outcome must be 'death'." in str(err)
+        for err in body["detail"]
+    )
+
+    files = list(tmp_path.glob("*.json"))
+    assert len(files) == 1
+    saved = json.loads(files[0].read_text(encoding="utf-8"))
+    assert saved["status"] == "rejected"
+    assert saved["body"]["death"] is True
+
+
+
 def test_evidence_search_returns_results():
     with TestClient(app) as client:
         response = client.get(

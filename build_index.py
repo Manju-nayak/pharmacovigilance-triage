@@ -1,5 +1,7 @@
 
 import json
+import os
+import shutil
 from pathlib import Path
 
 import pytesseract
@@ -17,17 +19,57 @@ INDEX_PATH = CORPUS_DIR / "evidence_index.json"
 CHUNK_SIZE = 1000
 CHUNK_OVERLAP = 150
 
-# Windows Tesseract executable
-TESSERACT_PATH = (
-    r"C:\Program Files\Tesseract-OCR\tesseract.exe"
-)
 
-# Windows Poppler binaries directory
-POPPLER_PATH = (
-    r"C:\Tools\poppler-26.09.0\Library\bin"
-)
+def find_tesseract_cmd() -> str | None:
+    """Locate tesseract executable from env, PATH, or standard locations."""
+    env_path = os.getenv("TESSERACT_PATH")
+    if env_path and Path(env_path).is_file():
+        return env_path
 
-pytesseract.pytesseract.tesseract_cmd = TESSERACT_PATH
+    which_path = shutil.which("tesseract")
+    if which_path:
+        return which_path
+
+    candidates = [
+        Path(r"C:\Program Files\Tesseract-OCR\tesseract.exe"),
+        Path(r"C:\Program Files (x86)\Tesseract-OCR\tesseract.exe"),
+        Path("/usr/bin/tesseract"),
+        Path("/usr/local/bin/tesseract"),
+    ]
+    for c in candidates:
+        if c.is_file():
+            return str(c)
+    return None
+
+
+def find_poppler_path() -> str | None:
+    """Locate poppler bin directory from env, PATH, or standard locations."""
+    env_path = os.getenv("POPPLER_PATH")
+    if env_path and Path(env_path).is_dir():
+        return env_path
+
+    which_pdftoppm = shutil.which("pdftoppm")
+    if which_pdftoppm:
+        return str(Path(which_pdftoppm).parent)
+
+    candidates = [
+        Path(r"C:\Tools\poppler-26.09.0\Library\bin"),
+        Path(r"C:\Program Files\poppler\bin"),
+        Path(r"C:\poppler\bin"),
+        Path("/usr/bin"),
+        Path("/usr/local/bin"),
+    ]
+    for c in candidates:
+        if (c / "pdftoppm.exe").is_file() or (c / "pdftoppm").is_file():
+            return str(c)
+    return None
+
+
+TESSERACT_PATH = find_tesseract_cmd()
+POPPLER_PATH = find_poppler_path()
+
+if TESSERACT_PATH:
+    pytesseract.pytesseract.tesseract_cmd = TESSERACT_PATH
 
 
 # --------------------------------------------------
@@ -61,7 +103,7 @@ def split_text(text):
 def extract_page_text(pdf_path, page_number):
     """
     Extract text from one PDF page.
-    Use OCR if the page has no selectable text.
+    Use OCR if the page has no selectable text and OCR tools are available.
     """
     reader = PdfReader(str(pdf_path))
     page = reader.pages[page_number - 1]
@@ -71,15 +113,26 @@ def extract_page_text(pdf_path, page_number):
     if text:
         return text, "text"
 
+    if not TESSERACT_PATH:
+        print(
+            f"  WARNING: Page {page_number} has no selectable text "
+            f"and Tesseract OCR is not configured."
+        )
+        return "", "ocr_unavailable"
+
     print(f"  Using OCR for page {page_number}...")
 
-    images = convert_from_path(
-        str(pdf_path),
-        first_page=page_number,
-        last_page=page_number,
-        dpi=250,
-        poppler_path=POPPLER_PATH,
-    )
+    try:
+        images = convert_from_path(
+            str(pdf_path),
+            first_page=page_number,
+            last_page=page_number,
+            dpi=250,
+            poppler_path=POPPLER_PATH,
+        )
+    except Exception as exc:
+        print(f"  WARNING: Poppler conversion failed on page {page_number}: {exc}")
+        return "", "ocr_failed"
 
     if not images:
         return "", "ocr"
@@ -101,13 +154,18 @@ def main():
         print(f"ERROR: Corpus directory not found: {CORPUS_DIR}")
         return
 
-    if not Path(TESSERACT_PATH).is_file():
-        print(f"ERROR: Tesseract not found: {TESSERACT_PATH}")
-        return
+    if TESSERACT_PATH:
+        print(f"Tesseract OCR: {TESSERACT_PATH}")
+    else:
+        print(
+            "NOTICE: Tesseract OCR not detected on PATH or TESSERACT_PATH. "
+            "Selectable text extraction will proceed; OCR fallback disabled."
+        )
 
-    if not (Path(POPPLER_PATH) / "pdftoppm.exe").is_file():
-        print(f"ERROR: Poppler not found: {POPPLER_PATH}")
-        return
+    if POPPLER_PATH:
+        print(f"Poppler path: {POPPLER_PATH}")
+    else:
+        print("NOTICE: Poppler path not detected on PATH or POPPLER_PATH.")
 
     pdf_files = sorted(CORPUS_DIR.glob("*.pdf"))
 

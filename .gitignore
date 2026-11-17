@@ -6,4 +6,6 @@ __pycache__/
 .env
 data/quarantine/*
 !data/quarantine/.gitkeep
+frontend/data/*.json
+!frontend/data/.gitkeep
 *.log

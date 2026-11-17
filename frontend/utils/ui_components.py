@@ -138,7 +138,17 @@ def render_evidence_card(item: Dict[str, Any], idx: int = 1):
     source = item.get("source", "Unknown Document")
     page = item.get("page", 1)
     method = item.get("extraction_method", "text").upper()
-    score = item.get("score") or item.get("keyword_overlap_score", 0.0)
+
+    # Retrieve score without falling back to misleading 0.0%
+    raw_score = item.get("score")
+    if raw_score is None:
+        raw_score = item.get("keyword_overlap_score")
+
+    if raw_score is not None and isinstance(raw_score, (int, float)):
+        score_display = f"{raw_score:.1%}"
+    else:
+        score_display = "N/A (Unscored)"
+
     matched_terms = item.get("matched_terms", [])
     raw_text = item.get("text", "")
 
@@ -154,7 +164,7 @@ def render_evidence_card(item: Dict[str, Any], idx: int = 1):
                     <span style="margin-left: 8px; font-size: 0.75rem; color: #64748b;">Method: {method}</span>
                 </div>
                 <div>
-                    <strong>Keyword Overlap:</strong> {score:.1%}
+                    <strong>Keyword Overlap:</strong> {score_display}
                 </div>
             </div>
             <div style="margin-bottom: 8px;">

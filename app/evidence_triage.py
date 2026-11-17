@@ -26,8 +26,13 @@ def assess_with_evidence(report: AdverseEventReport) -> dict:
         {
             "source": item["source"],
             "page": item["page"],
+            "chunk": item.get("chunk"),
             "extraction_method": item["extraction_method"],
             "matched_terms": item["matched_terms"],
+            "score": item.get("score"),
+            "keyword_overlap_score": item.get(
+                "keyword_overlap_score", item.get("score")
+            ),
             "text": item["text"],
         }
         for item in evidence

@@ -68,6 +68,11 @@ def test_live_server_full_integration():
         assert wf_data["workflow_status"] == "verification_completed"
         assert wf_data["triage_result"]["priority"] == "urgent_human_review"
         assert len(wf_data["evidence_result"]["evidence"]) > 0
+        for ev_item in wf_data["evidence_result"]["evidence"]:
+            assert "score" in ev_item
+            assert "keyword_overlap_score" in ev_item
+            assert isinstance(ev_item["score"], float)
+            assert ev_item["score"] > 0
         assert wf_data["verification_result"]["verified"] is True
         assert wf_data["requires_qualified_review"] is True
 

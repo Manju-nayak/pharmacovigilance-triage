@@ -55,3 +55,18 @@ def test_evidence_triage_reports_retrieval_status():
         "no_results",
         "unavailable",
     }
+
+
+def test_evidence_triage_preserves_retrieval_scores():
+    report = make_report()
+
+    result = assess_with_evidence(report)
+
+    assert result["evidence"], "Expected non-empty evidence list"
+    for item in result["evidence"]:
+        assert "score" in item
+        assert "keyword_overlap_score" in item
+        assert isinstance(item["score"], float)
+        assert item["score"] > 0
+        assert item["keyword_overlap_score"] == item["score"]
+

@@ -180,22 +180,52 @@ with tab_triage:
                     st.info(f"**Signal: {signal_type}**\n\n{reason}")
 
     with sig_col2:
-        st.markdown("#### Regulatory Seriousness & Expectedness")
+        st.markdown("#### Regulatory Seriousness & Expectedness Evaluation")
 
-        # Actual Seriousness Breakdown (Strictly derived from backend)
+        # Separate explicit regulatory outcomes from automated screening text signals
         is_hosp = bool(report_data.get("hospitalization"))
         is_death = bool(report_data.get("death"))
         has_serious_text = any(s.get("signal") == "potentially_serious_reaction_text" for s in signals)
-        is_serious = is_hosp or is_death or has_serious_text
+
+        if is_death or is_hosp:
+            seriousness_status_html = '<span style="color:#dc2626; font-weight:700;">EXPLICIT REGULATORY CRITERIA REPORTED</span>'
+            seriousness_detail = (
+                "Case contains explicit regulatory seriousness criteria: "
+                + ("<strong>Reported Death</strong>" if is_death else "")
+                + (", " if is_death and is_hosp else "")
+                + ("<strong>Inpatient Hospitalization</strong>" if is_hosp else "")
+                + "."
+            )
+        elif has_serious_text:
+            seriousness_status_html = '<span style="color:#d97706; font-weight:700;">HUMAN REGULATORY EVALUATION REQUIRED</span>'
+            seriousness_detail = (
+                "Preliminary warning keywords were detected in the clinical narrative. "
+                "<strong>Note:</strong> Matching warning terms flags review urgency, but does "
+                "<em>not</em> automatically establish an official 'Important Medical Event' under "
+                "ICH E2A guidelines. A qualified physician or safety officer must evaluate the "
+                "clinical context to make a formal seriousness determination."
+            )
+        else:
+            seriousness_status_html = '<span style="color:#059669; font-weight:700;">NO SERIOUSNESS CRITERIA REPORTED</span>'
+            seriousness_detail = (
+                "Neither death nor hospitalization was reported, and no high-urgency safety keywords were detected."
+            )
 
         st.markdown(
             f"""
             <div style="background:#ffffff; border:1px solid #e2e8f0; border-radius:8px; padding:14px; margin-bottom:12px;">
-                <strong>Seriousness Classification (ICH E2A Criteria):</strong><br>
-                • <strong>Regulatory Seriousness:</strong> {'<span style="color:#dc2626; font-weight:700;">SERIOUS</span>' if is_serious else '<span style="color:#059669; font-weight:700;">NON-SERIOUS</span>'}<br>
-                • Resulted in Death: <strong>{'Yes (Fatal Event)' if is_death else 'No'}</strong><br>
-                • Caused/Prolonged Hospitalization: <strong>{'Yes' if is_hosp else 'No'}</strong><br>
-                • Important Medical Event / Warning Terms: <strong>{'Yes (Matched high-risk terms)' if has_serious_text else 'None'}</strong>
+                <div style="margin-bottom:8px;">
+                    <strong>Formal Seriousness Status:</strong> {seriousness_status_html}
+                </div>
+                <div style="font-size:0.875rem; color:#334155; line-height:1.45; margin-bottom:10px;">
+                    {seriousness_detail}
+                </div>
+                <div style="font-size:0.82rem; background:#f8fafc; padding:8px 10px; border-radius:6px; border:1px solid #e2e8f0;">
+                    <strong>ICH E2A Reported Outcomes Breakdown:</strong><br>
+                    • Resulted in Death: <strong>{'Yes (Fatal Event)' if is_death else 'No'}</strong><br>
+                    • Required Hospitalization: <strong>{'Yes' if is_hosp else 'No'}</strong><br>
+                    • Preliminary Screening Warning Terms: <strong>{'Flagged for review' if has_serious_text else 'None'}</strong>
+                </div>
             </div>
             """,
             unsafe_allow_html=True,

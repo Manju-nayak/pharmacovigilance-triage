@@ -10,6 +10,11 @@ from frontend.utils.ui_components import (
     render_priority_badge,
     render_status_badge,
     highlight_matched_terms,
+    render_evidence_card,
+)
+from frontend.utils.validators import (
+    validate_death_outcome_consistency,
+    validate_report_form,
 )
 from frontend.utils.session import (
     save_persistent_history,
@@ -137,3 +142,104 @@ def test_api_integration_endpoints():
         tri_res = tc.post("/triage", json=preset)
         assert tri_res.status_code == 200
         assert tri_res.json()["triage"]["priority"] == "urgent_human_review"
+
+
+def test_form_validation_prevents_invalid_submission():
+    """Verify validators catch inconsistent death/outcome and malformed fields."""
+    # 1. Death = True, Outcome = recovering -> MUST FAIL
+    valid, err = validate_death_outcome_consistency(True, "recovering")
+    assert valid is False
+    assert "outcome must be 'Death'" in err
+
+    # 2. Death = False, Outcome = death -> MUST FAIL
+    valid, err = validate_death_outcome_consistency(False, "death")
+    assert valid is False
+    assert "'Resulted in Death' must be checked" in err
+
+    # 3. Death = True, Outcome = death -> VALID
+    valid, err = validate_death_outcome_consistency(True, "death")
+    assert valid is True
+    assert err is None
+
+    # 4. Death = False, Outcome = recovered -> VALID
+    valid, err = validate_death_outcome_consistency(False, "recovered")
+    assert valid is True
+    assert err is None
+
+    # 5. Full form validation prevents submission on invalid death/outcome
+    is_valid, errors = validate_report_form({
+        "case_id": "VAL-001",
+        "drug_name": "TestDrug",
+        "reaction_description": "Valid reaction description text.",
+        "death": True,
+        "outcome": "recovered",
+    })
+    assert is_valid is False
+    assert any("outcome must be 'Death'" in e for e in errors)
+
+    # 6. Full form validation catches missing required fields
+    is_valid, errors = validate_report_form({
+        "case_id": "",
+        "drug_name": "A",
+        "reaction_description": "bad",
+        "death": False,
+        "outcome": "recovered",
+    })
+    assert is_valid is False
+    assert len(errors) >= 3
+
+
+def test_evidence_card_score_display_avoids_misleading_zero(monkeypatch):
+    """Ensure evidence cards display 'N/A (Unscored)' rather than misleading '0.0%' when scores are missing."""
+    rendered_markdown = []
+
+    def fake_markdown(content, unsafe_allow_html=False):
+        rendered_markdown.append(content)
+
+    monkeypatch.setattr("streamlit.markdown", fake_markdown)
+
+    # Case A: Item with valid score
+    scored_item = {
+        "source": "test_insert.pdf",
+        "page": 2,
+        "extraction_method": "text",
+        "score": 0.45,
+        "matched_terms": ["rash"],
+        "text": "Reported rash in clinical trials.",
+    }
+    render_evidence_card(scored_item, idx=1)
+    assert len(rendered_markdown) == 1
+    assert "45.0%" in rendered_markdown[0]
+
+    # Case B: Item with missing score (None)
+    rendered_markdown.clear()
+    unscored_item = {
+        "source": "test_insert.pdf",
+        "page": 2,
+        "extraction_method": "text",
+        "score": None,
+        "keyword_overlap_score": None,
+        "matched_terms": ["rash"],
+        "text": "Reported rash in clinical trials.",
+    }
+    render_evidence_card(unscored_item, idx=2)
+    assert len(rendered_markdown) == 1
+    assert "N/A (Unscored)" in rendered_markdown[0]
+    assert "0.0%" not in rendered_markdown[0]
+
+
+def test_score_propagation_in_workflow():
+    """Verify workflow evidence items contain actual score and keyword_overlap_score."""
+    with TestClient(app) as tc:
+        preset = SAMPLE_PRESETS["Preset 1: Carbamazepine SJS/TEN (Urgent Review)"]
+        res = tc.post("/workflow/run", json=preset)
+        assert res.status_code == 200
+        data = res.json()
+        evidence_items = data["evidence_result"]["evidence"]
+        assert len(evidence_items) > 0
+        for item in evidence_items:
+            assert "score" in item
+            assert "keyword_overlap_score" in item
+            assert isinstance(item["score"], float)
+            assert item["score"] > 0
+

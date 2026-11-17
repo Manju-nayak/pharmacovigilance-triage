@@ -81,6 +81,13 @@ async def validation_exception_handler(
         str(uuid.uuid4()),
     )
 
+    # Sanitize Pydantic validation errors so context exceptions (e.g. ValueError)
+    # are converted to strings and safe for JSON serialization.
+    safe_errors = jsonable_encoder(
+        exc.errors(),
+        custom_encoder={ValueError: str, Exception: str},
+    )
+
     try:
         raw_body = await request.body()
 
@@ -93,11 +100,6 @@ async def validation_exception_handler(
                     errors="replace",
                 )
             }
-
-        safe_errors = jsonable_encoder(
-            exc.errors(),
-            custom_encoder={ValueError: str},
-        )
 
         quarantine_record(
             body=body,
@@ -119,14 +121,14 @@ async def validation_exception_handler(
         content=jsonable_encoder(
             {
                 "status": "rejected",
-                "detail": exc.errors(),
+                "detail": safe_errors,
                 "request_id": request_id,
                 "message": (
                     "The submitted report failed schema validation "
                     "and was rejected."
                 ),
             },
-            custom_encoder={ValueError: str},
+            custom_encoder={ValueError: str, Exception: str},
         ),
     )
 
